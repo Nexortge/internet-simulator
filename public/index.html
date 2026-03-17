@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Internet Slop Simulator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>INTERNET SLOP SIMULATOR</h1>
+  <p class="subtitle">Simulate your media's journey through the depths of the internet</p>
+</header>
+
+<main>
+
+  <!-- ── Upload Zone ─────────────────────────────────────── -->
+  <div id="upload-zone" class="upload-zone">
+    <div class="upload-icon">📁</div>
+    <p class="upload-text">Drop media here or click to select</p>
+    <p class="upload-sub">Images · Video · Audio &nbsp;·&nbsp; Max 500 MB</p>
+    <input type="file" id="file-input" accept="image/*,video/*,audio/*" hidden>
+  </div>
+
+  <!-- ── Mode + Controls ────────────────────────────────── -->
+  <div id="controls-panel" class="controls-panel hidden">
+
+    <!-- Mode toggle -->
+    <div class="mode-toggle">
+      <button id="btn-magic"  class="mode-btn active">✨ Magic Slop</button>
+      <button id="btn-custom" class="mode-btn">⚙️ Custom</button>
+    </div>
+
+    <!-- MAGIC mode -->
+    <div id="mode-magic" class="mode-section">
+      <div class="magic-slider-wrap">
+        <div class="magic-labels-top">
+          <span id="magic-label-left" class="magic-label-side dim">Barely Slopped</span>
+          <span id="magic-level-display" class="magic-level">5</span>
+          <span id="magic-label-right" class="magic-label-side dim">Maximum Slop</span>
+        </div>
+        <input type="range" id="slop-slider" class="slop-range" min="1" max="10" value="5">
+        <p id="magic-vibe" class="magic-vibe">Peak Internet</p>
+      </div>
+      <!-- Video-only FX checkboxes — hidden for images/audio via JS -->
+      <div id="video-fx" class="video-fx hidden">
+        <label class="fx-row" id="encoding-lag-row">
+          <span class="fx-toggle">
+            <input type="checkbox" id="encoding-lag-check">
+            <span class="fx-knob"></span>
+          </span>
+          <span class="fx-text">
+            <span class="fx-name">Encoding Lag</span>
+            <span class="fx-desc">Encoder can't keep up — irregular frame skips and choppy playback</span>
+          </span>
+        </label>
+        <div class="fx-slider-row fx-dependent" id="lag-freq-row">
+          <div class="fx-slider-header">
+            <span class="fx-name">Lag Frequency</span>
+            <span class="fx-slider-val" id="lag-freq-val">3</span>
+          </div>
+          <div class="fx-slider-body">
+            <span class="fx-sublabel dim">Rare</span>
+            <input type="range" id="lag-freq-slider" class="fx-range" min="1" max="10" value="3">
+            <span class="fx-sublabel dim">Often</span>
+          </div>
+        </div>
+        <label class="fx-row" id="fps-drops-row">
+          <span class="fx-toggle">
+            <input type="checkbox" id="fps-drops-check">
+            <span class="fx-knob"></span>
+          </span>
+          <span class="fx-text">
+            <span class="fx-name">FPS Drops</span>
+            <span class="fx-desc">Randomly freeze frames — video holds, audio continues</span>
+          </span>
+        </label>
+        <div class="fx-slider-row fx-dependent" id="freeze-freq-row">
+          <div class="fx-slider-header">
+            <span class="fx-name">Freeze Frequency</span>
+            <span class="fx-slider-val" id="freeze-freq-val">5</span>
+          </div>
+          <div class="fx-slider-body">
+            <span class="fx-sublabel dim">Rare</span>
+            <input type="range" id="freeze-freq-slider" class="fx-range" min="1" max="20" value="5">
+            <span class="fx-sublabel dim">Often</span>
+          </div>
+        </div>
+        <div class="fx-slider-row fx-dependent" id="freeze-style-row">
+          <div class="fx-slider-header">
+            <span class="fx-name">Freeze Style</span>
+          </div>
+          <div class="fx-slider-body">
+            <span class="fx-sublabel dim">Stutter</span>
+            <input type="range" id="freeze-style-slider" class="fx-range" min="0" max="100" value="50">
+            <span class="fx-sublabel dim">Hold</span>
+          </div>
+        </div>
+        <label class="fx-row fx-dependent" id="datamorph-row">
+          <span class="fx-toggle">
+            <input type="checkbox" id="datamorph-check" disabled>
+            <span class="fx-knob"></span>
+          </span>
+          <span class="fx-text">
+            <span class="fx-name">Datamorphing <span class="fx-req">requires FPS Drops</span></span>
+            <span class="fx-desc">After each freeze, old frame data bleeds into new frames</span>
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <!-- CUSTOM mode -->
+    <div id="mode-custom" class="mode-section hidden">
+
+      <div class="custom-header-row">
+        <div class="passes-control">
+          <label for="passes-input">Passes</label>
+          <input type="number" id="passes-input" min="1" max="20" value="3" class="passes-num">
+          <input type="range"  id="passes-range" min="1" max="20" value="3" class="passes-range-input">
+        </div>
+        <button id="btn-apply-all" class="btn-secondary" title="Copy pass 1 settings to all passes">Apply Pass 1 to All</button>
+        <button id="btn-reset-custom" class="btn-secondary">Reset</button>
+      </div>
+
+      <!-- Column headers -->
+      <div class="pass-header-row">
+        <span class="ph-pass">#</span>
+        <span class="ph-label">Compression <span class="ph-sub">quality %</span></span>
+        <span class="ph-label">Noise</span>
+        <span class="ph-label">Crop <span class="ph-sub">max %</span></span>
+        <span class="ph-label">Rotation <span class="ph-sub">max °</span></span>
+        <span class="ph-label">Color Drift</span>
+        <span class="ph-label">Scale Down <span class="ph-sub">%</span></span>
+        <span class="ph-label">FPS <span class="ph-sub">0=keep</span></span>
+        <span class="ph-label">Pixelate <span class="ph-sub">0=off</span></span>
+        <span class="ph-label">Bad Crop <span class="ph-sub">% chance</span></span>
+      </div>
+
+      <div id="pass-list" class="pass-list">
+        <!-- rows injected by app.js -->
+      </div>
+
+    </div>
+
+    <!-- Export options (shared) -->
+    <label class="export-option" id="size-cap-row">
+      <input type="checkbox" id="size-cap-check">
+      <span class="export-option-text">
+        <span class="export-option-name">Fit for upload <span class="export-option-badge">&lt; 99 MB</span></span>
+        <span class="export-option-desc">Re-encode output to stay under 99 MB without extra degradation</span>
+      </span>
+    </label>
+
+    <!-- Slopify button (shared) -->
+    <button id="slopify-btn" class="slopify-btn">SLOPIFY</button>
+  </div>
+
+  <!-- ── Progress ───────────────────────────────────────── -->
+  <div id="progress-panel" class="progress-panel hidden">
+    <div class="progress-text" id="progress-text">Processing through the internet pipeline…</div>
+    <div class="progress-bar"><div class="progress-fill"></div></div>
+  </div>
+
+  <!-- ── Results ────────────────────────────────────────── -->
+  <div id="results-panel" class="results-panel hidden">
+
+    <!-- Image comparison (side by side) -->
+    <div id="img-compare" class="av-compare hidden">
+      <div class="av-panel">
+        <div class="av-label">ORIGINAL</div>
+        <div class="av-media"><img id="compare-original" style="max-width:100%;max-height:400px;object-fit:contain;" alt="Original"></div>
+        <div id="img-original-size" class="av-size"></div>
+      </div>
+      <div class="av-panel">
+        <div class="av-label slopped-label">SLOPPED</div>
+        <div class="av-media"><img id="compare-degraded" style="max-width:100%;max-height:400px;object-fit:contain;" alt="Slopped"></div>
+        <div id="img-degraded-size" class="av-size"></div>
+      </div>
+    </div>
+
+    <!-- Video / Audio side-by-side -->
+    <div id="av-compare" class="av-compare hidden">
+      <div class="av-panel">
+        <div class="av-label">ORIGINAL</div>
+        <div id="av-original" class="av-media"></div>
+        <div id="av-original-size" class="av-size"></div>
+      </div>
+      <div class="av-panel">
+        <div class="av-label slopped-label">SLOPPED</div>
+        <div id="av-degraded" class="av-media"></div>
+        <div id="av-degraded-size" class="av-size"></div>
+      </div>
+    </div>
+
+    <!-- Stats + actions -->
+    <div class="result-actions">
+      <div id="size-info" class="size-info"></div>
+      <button id="download-btn" class="download-btn">⬇ Download Slopped File</button>
+      <button id="reset-btn" class="reset-btn">Slopify Another</button>
+    </div>
+
+  </div>
+
+</main>
+
+<script src="image-degrader.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
