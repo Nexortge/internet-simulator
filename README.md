@@ -52,7 +52,7 @@ sudo apt install ffmpeg
 
 **Option A — With Git** (if you have Git installed):
 ```bash
-git clone https://github.com/YOUR_USERNAME/internet-slop-simulator.git
+git clone [https://github.com/YOUR_USERNAME/internet-slop-simulator.git](https://github.com/Nexortge/internet-simulator)
 cd internet-slop-simulator
 ```
 
