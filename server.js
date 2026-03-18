@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const os = require('os');
 const crypto = require('crypto');
 
@@ -11,6 +11,22 @@ const PORT = process.env.PORT || 3000;
 
 const UPLOAD_DIR = path.join(os.tmpdir(), 'slop-simulator');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// Detect the best hard-clip audio filter available in this FFmpeg build.
+// aclip (≥4.4) > asoftclip=type=hard > aeval expression fallback.
+// Runs synchronously at startup so every request uses the same cached value.
+const AUDIO_CLIP_FILTER = (() => {
+  try {
+    const r = spawnSync('ffmpeg', ['-filters'], { encoding: 'utf8', timeout: 5000 });
+    const out = (r.stdout || '') + (r.stderr || '');
+    if (out.includes(' aclip '))     return 'aclip';
+    if (out.includes(' asoftclip ')) return 'asoftclip=type=hard';
+  } catch {}
+  // aeval fallback: commas inside the expression are escaped so FFmpeg's
+  // filter-chain parser doesn't mistake them for filter separators.
+  return 'aeval=min(max(val\\,-1)\\,1)';
+})();
+console.log(`[audio] clip filter: ${AUDIO_CLIP_FILTER}`);
 
 const storage = multer.diskStorage({
   destination: UPLOAD_DIR,
@@ -58,8 +74,10 @@ function emitProgress(jobId, step, total, message) {
 
 app.get('/api/ffmpeg-check', (req, res) => {
   const proc = spawn('ffmpeg', ['-version']);
-  proc.on('close', code => res.json({ available: code === 0 }));
-  proc.on('error', () => res.json({ available: false }));
+  let responded = false;
+  const reply = (available) => { if (!responded) { responded = true; res.json({ available }); } };
+  proc.on('close', code => reply(code === 0));
+  proc.on('error', () => reply(false));
 });
 
 // passConfigs is JSON array: [{compression,noise,crop,rotation,colorDrift,scale}, ...]
@@ -82,8 +100,11 @@ app.post('/api/degrade', upload.single('file'), async (req, res) => {
   let lagConfig = null;
   try { lagConfig = req.body.lagConfig ? JSON.parse(req.body.lagConfig) : null; } catch {}
 
-  const jobId  = req.body.jobId || null;
-  const isVideo = req.file.mimetype.startsWith('video/');
+  const jobId       = req.body.jobId || null;
+  const isVideo     = req.file.mimetype.startsWith('video/');
+  // 'realistic': pass 1 = nearest-neighbor, pass 2+ = bicubic (default)
+  // 'aggressive': always nearest-neighbor (current legacy behaviour)
+  const upscaleMode = req.body.upscaleMode === 'aggressive' ? 'aggressive' : 'realistic';
 
   // Pre-compute total steps so the client bar fills proportionally.
   // Each compression pass is one step; FX stages each count as one additional step.
@@ -113,7 +134,10 @@ app.post('/api/degrade', upload.single('file'), async (req, res) => {
     const ops = [];
 
     passConfigs.forEach((cfg, i) => {
-      ops.push({ type: 'compress', slot: i + 1, cfg, label: `Compressing… (pass ${i + 1}/${n})` });
+      // Attach pass index and upscale mode so buildFFmpegArgs can vary the
+      // upscaling algorithm: nearest-neighbor on pass 1 for hard pixelation,
+      // bicubic on later passes to mimic what real phone editors do.
+      ops.push({ type: 'compress', slot: i + 1, cfg: { ...cfg, passIndex: i, upscaleMode }, label: `Compressing… (pass ${i + 1}/${n})` });
     });
 
     if (isVideo && lagConfig?.enabled) {
@@ -234,6 +258,81 @@ function runFFmpegPass(inputPath, outputPath, cfg, isVideo) {
   });
 }
 
+// ── Audio degradation filter chain ───────────────────────
+// Returns an array of -af filter strings for one compression pass.
+// Effects scale with cfg.compression (proxy for slop level):
+//   t ≈ 0.15 at slop 1  →  t ≈ 0.93 at slop 10.
+// All triggered probabilistically so passes feel organic, not mechanical.
+//
+// Filter order mirrors real platform processing:
+//   timing error → resampling → loudness normalisation → codec ghosting → channel format
+//
+// Requires FFmpeg ≥ 4.4 for aclip.
+function buildAudioFilters(cfg, isVideo) {
+  const t       = Math.max(0, Math.min(1, 1 - cfg.compression / 100));
+  const afParts = [];
+
+  // 1. Sync drift — per-pass delay that accumulates across passes.
+  //    Only applied to video: audio-only files have no reference track to drift
+  //    against, so a uniform delay is completely inaudible and pointless.
+  //    At slop 10 with 8 passes and ~90% trigger rate the expected total drift
+  //    is ~7 × 50 ms = ~350 ms — clearly noticeable A/V desync.
+  if (isVideo && Math.random() < 0.35 + t * 0.55) {
+    const delayMs = Math.round(5 + t * 45); // 5 ms (slop 1) → 50 ms (slop 10)
+    afParts.push(`adelay=${delayMs}|${delayMs}`);
+  }
+
+  // 2. Sample rate artifacts — downsample to a misaligned intermediate rate
+  //    then back up.  The lossy round-trip introduces aliasing shimmer on high
+  //    frequencies, the characteristic "digital thinning" of repeated transcoding.
+  //    Output rate is 48 000 Hz for video (DAW/player compatibility) or
+  //    44 100 Hz for standalone audio (standard MP3 rate).
+  if (Math.random() < 0.35 + t * 0.5) {
+    const midRate    = t < 0.33 ? 22050 : t < 0.66 ? 16000 : 11025;
+    const outputRate = isVideo ? 48000 : 44100;
+    afParts.push(`aresample=${midRate},aresample=${outputRate}`);
+  }
+
+  // 3. Clipping / loudness normalisation — simulate aggressive platform auto-gain.
+  //    volume boost + aclip (hard waveform clip to [-1, 1]) creates genuine flat-top
+  //    distortion: intermodulation, harshness — the sound of a file normalised too hot.
+  //    Intentionally unpleasant; this is NOT a limiter, it is actual clipping.
+  if (t > 0.1) {
+    const gain = (1 + t * 0.8).toFixed(2); // 1.0× (slop 1) → 1.8× (slop 10)
+    afParts.push(`volume=${gain},${AUDIO_CLIP_FILTER}`);
+  }
+
+  // 4. Pre-echo / codec ghosting — very short echo simulates psychoacoustic
+  //    smearing from repeated MP3/AAC encoding.  5–15 ms delay; decay 0.02–0.15.
+  //    Nearly inaudible at slop 1, faint shimmer by slop 7–8.
+  if (Math.random() < 0.25 + t * 0.55) {
+    const echoDelay = 5 + Math.floor(Math.random() * 11); // 5–15 ms, random per pass
+    const echoDecay = (0.02 + t * 0.13).toFixed(3);
+    afParts.push(`aecho=1.0:0.9:${echoDelay}:${echoDecay}`);
+  }
+
+  // 5. Stereo collapse / one-ear — pan filter effects.
+  //    Skipped when compression < 25 because that path already forces mono via
+  //    -ac 1; applying a stereo pan to a signal about to be mixed down is redundant.
+  //    One-ear and stereo collapse are mutually exclusive: one roll picks the branch.
+  if (cfg.compression >= 25) {
+    const collapseChance = Math.max(0, (t - 0.3) * 0.9);  // 0 at slop ≤3, ~57% at slop 10
+    const oneEarChance   = Math.max(0, (t - 0.55) * 0.2); // 0 at slop ≤6, ~8% at slop 10
+    const roll = Math.random();
+    if (roll < oneEarChance) {
+      // Accidental hard pan — simulates a channel mute during a bad export
+      afParts.push(Math.random() < 0.5
+        ? 'pan=stereo|c0=c0|c1=0'   // left only
+        : 'pan=stereo|c0=0|c1=c1'); // right only
+    } else if (roll < oneEarChance + collapseChance) {
+      // Stereo collapse — both channels summed to equal mono signal
+      afParts.push('pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1');
+    }
+  }
+
+  return afParts;
+}
+
 function buildFFmpegArgs(inputPath, outputPath, cfg, isVideo) {
   // cfg.compression: 1–100 (100=best quality, 1=worst)
   // cfg.scale: 0–50 (% to scale down; 0=no scaling, 50=scale to 50% then back)
@@ -244,27 +343,75 @@ function buildFFmpegArgs(inputPath, outputPath, cfg, isVideo) {
   const args = ['-y', '-i', inputPath];
 
   if (isVideo) {
-    const crf = Math.round(51 - (cfg.compression / 100) * 33); // compression 100→crf18, 1→crf51
+    const crf = Math.round(43 - (cfg.compression / 100) * 23); // compression 100→crf20, 1→crf43
     const audioBitrate = Math.max(16, Math.round((cfg.compression / 100) * 128));
 
     const vfParts = [];
 
-    // Pixelation: scale down then back up using nearest-neighbor (flags=neighbor).
-    // Applied first so the codec compresses the blocky result — same as real platform re-encoding.
+    // Determine upscale algorithm for this pass.
+    // Pass 1 (passIndex=0) always uses nearest-neighbor for aggressive blocky pixelation.
+    // Pass 2+ in 'realistic' mode switches to bicubic, mimicking what Instagram/WhatsApp
+    // do when they re-encode: they smooth out the blocks, adding blur artifacts instead.
+    // 'aggressive' mode keeps nearest-neighbor on every pass (the old behaviour).
+    const isFirstPass   = (cfg.passIndex ?? 0) === 0;
+    const useNeighbor   = isFirstPass || cfg.upscaleMode === 'aggressive';
+    const upscaleFlags  = useNeighbor ? 'neighbor' : 'bicubic';
+
+    // Pixelation: scale down then back up.
+    // Applied first so the codec compresses the result — same as real platform re-encoding.
     if (cfg.pixelate > 0) {
       const factor = Math.max(2, Math.round(1 + (cfg.pixelate / 10) * 2.5));
       vfParts.push(`scale=iw/${factor}:ih/${factor}`);
-      vfParts.push(`scale=iw*${factor}:ih*${factor}:flags=neighbor`);
+      vfParts.push(`scale=iw*${factor}:ih*${factor}:flags=${upscaleFlags}`);
     }
 
     if (cfg.scale > 0) {
       const down = Math.round(100 - cfg.scale);
       const up = Math.round(10000 / down);
       vfParts.push(`scale=iw*${down}/100:ih*${down}/100`);
-      vfParts.push(`scale=iw*${up}/100:ih*${up}/100`);
+      // Scale-up uses the same pass-aware flag so the effect is consistent
+      vfParts.push(`scale=iw*${up}/100:ih*${up}/100:flags=${upscaleFlags}`);
     }
     // Always enforce even dimensions for h264
     vfParts.push('scale=trunc(iw/2)*2:trunc(ih/2)*2');
+
+    // Misaligned resample — simulates re-encoding to a non-standard platform resolution.
+    // Both sub-steps share per-pass offsets so the smear and ratio drift are coupled.
+    // Offsets scale with compression (proxy for slop): ~2–4 px at slop 1, ~6–8 px at slop 10.
+    // All offsets are forced even so h264 never sees odd pixel dimensions.
+    {
+      const t = Math.max(0, Math.min(1, 1 - cfg.compression / 100));
+      const minOff = Math.max(2, Math.round(t * 6));
+      const minOffEven = minOff % 2 === 0 ? minOff : minOff + 1;
+      const dw = minOffEven + (Math.random() < 0.5 ? 0 : 2);
+      const dh = minOffEven + (Math.random() < 0.5 ? 0 : 2);
+
+      // A. Scale down to a misaligned resolution, then back up with bicubic smear.
+      //    iw/ih in each filter refer to the input to that filter, so iw+dw after
+      //    the down-scale restores the original even dimensions exactly.
+      vfParts.push(`scale=iw-${dw}:ih-${dh}`);
+      vfParts.push(`scale=iw+${dw}:ih+${dh}:flags=bicubic`);
+
+      // B. Ratio drift: pad 1–2 random sides then scale back to original dimensions.
+      //    The black border gets squished into the content on scale-back, causing
+      //    subtle aspect ratio distortion that compounds across passes.
+      const allSides = ['left', 'right', 'top', 'bottom'].sort(() => Math.random() - 0.5);
+      const sides = allSides.slice(0, 1 + Math.floor(Math.random() * 2));
+      let pl = 0, pr = 0, pt = 0, pb = 0;
+      for (const side of sides) {
+        if (side === 'left')   pl = dw;
+        if (side === 'right')  pr = dw;
+        if (side === 'top')    pt = dh;
+        if (side === 'bottom') pb = dh;
+      }
+      const totalPadW = pl + pr;
+      const totalPadH = pt + pb;
+      // pad=W:H:x:y — x/y is the offset of the original frame within the padded output
+      vfParts.push(
+        `pad=iw+${totalPadW}:ih+${totalPadH}:${pl}:${pt}:black,` +
+        `scale=iw-${totalPadW}:ih-${totalPadH}`
+      );
+    }
 
     if (cfg.noise > 0) {
       const strength = Math.round((cfg.noise / 100) * 40);
@@ -297,7 +444,8 @@ function buildFFmpegArgs(inputPath, outputPath, cfg, isVideo) {
         if (side === 'top')    ptPct = pct;
         if (side === 'bottom') pbPct = pct;
       }
-      const color  = Math.random() < 0.85 ? 'black' : 'white';
+      const PLATFORM_COLORS = ['0x1c1c1c', '0x000000', '0xffffff', '0x36393f'];
+      const color = PLATFORM_COLORS[Math.floor(Math.random() * PLATFORM_COLORS.length)];
       const totalW = (1 + plPct + prPct).toFixed(5);
       const totalH = (1 + ptPct + pbPct).toFixed(5);
       // pad adds the bars (iw/ih here = pre-pad dimensions), then scale squishes back —
@@ -310,6 +458,8 @@ function buildFFmpegArgs(inputPath, outputPath, cfg, isVideo) {
       console.log(`[bad-crop] sides=${sides.join('+')}  color=${color}  W×${totalW}  H×${totalH}`);
     }
 
+    const afParts = buildAudioFilters(cfg, true);
+
     args.push(
       '-vf', vfParts.join(','),
       '-c:v', 'libx264',
@@ -317,14 +467,17 @@ function buildFFmpegArgs(inputPath, outputPath, cfg, isVideo) {
       '-preset', 'ultrafast',
       '-c:a', 'aac',
       '-b:a', `${audioBitrate}k`,
+      ...(afParts.length > 0 ? ['-af', afParts.join(',')] : []),
       '-movflags', '+faststart',
       outputPath
     );
   } else {
     // Audio
     const bitrate = Math.max(8, Math.round((cfg.compression / 100) * 128));
-    const afParts = [];
 
+    const afParts = buildAudioFilters(cfg, false);
+    // colorDrift-based tonal shaping goes after the new artefact effects —
+    // these represent output-shaping (like a cheap phone speaker EQ), not codec damage.
     if (cfg.colorDrift > 60) afParts.push('lowpass=f=8000');
     if (cfg.colorDrift > 80) afParts.push('highpass=f=300');
 
@@ -370,19 +523,25 @@ function getVideoDuration(filePath) {
 }
 
 // Generate random, non-overlapping freeze intervals within the video.
-// Count scales with slopLevel (base) and freezeFrequency (user multiplier).
+// Count is density-based: freezes/minute × duration × slop multiplier (~0.3×).
+//   e.g. freq=3, slop=3, 1-min video → round(3 × 1 × 0.9) = 3 freezes
+//        freq=10, slop=5, 1-min video → round(10 × 1 × 1.5) = 15 freezes
 // loopTypeBias: 0 = all tight (stutter), 100 = all loose (hold), 50 = 50/50.
 function generateFreezeIntervals(duration, slopLevel, freezeFrequency = 5, loopTypeBias = 50) {
-  const t         = (slopLevel - 1) / 9;
-  const baseCount = Math.round(1 + t * 6);          // 1–7 based on slop level
-  // Frequency slider: 5 = no change, 1 = ~20%, 10 = ~200% of base count
-  const count     = Math.max(1, Math.round(baseCount * (freezeFrequency / 5)));
-  const minDur    = 0.2 + t * 0.6;                   // 0.2–0.8 s min freeze
-  const maxDur    = 0.5 + t * 3.0;                   // 0.5–3.5 s max freeze
-  const padding   = 1.0;                              // leave 1 s at each end
+  const t       = (slopLevel - 1) / 9;
+  const minDur  = 0.2 + t * 0.6;   // 0.2–0.8 s min freeze
+  const maxDur  = 0.5 + t * 3.0;   // 0.5–3.5 s max freeze
+  const padding = 1.0;              // leave 1 s at each end
+
+  // Density-based count so the slider feels consistent regardless of video length.
+  const rawCount = Math.round(freezeFrequency * (duration / 60) * (slopLevel * 0.3));
+
+  // Cap at what can physically fit: each freeze needs at least minDur + 0.5 s gap.
+  const availableWindow = Math.max(0, duration - padding * 2);
+  const maxFeasible     = Math.max(1, Math.floor(availableWindow / (minDur + 0.5)));
+  const count           = Math.min(maxFeasible, Math.max(1, rawCount));
 
   const intervals = [];
-  // Attempt up to 5× the desired count to find non-overlapping slots
   for (let attempt = 0; attempt < count * 5 && intervals.length < count; attempt++) {
     const dur   = minDur + Math.random() * (maxDur - minDur);
     const start = padding + Math.random() * Math.max(0, duration - padding * 2 - dur);

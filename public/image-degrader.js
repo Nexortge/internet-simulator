@@ -97,8 +97,42 @@ async function applyPass(canvas, ctx, cfg) {
     ctx.drawImage(tmp.canvas, 0, 0);
   }
 
+  // 3.5. Misaligned resample — simulates re-encoding to a non-standard platform resolution.
+  // Both sub-steps share the same per-pass offsets so the smear and ratio drift are coupled.
+  // Offset magnitude scales with compression level (proxy for slop level):
+  //   ~2–4 px at slop 1, ~4–6 px at slop 5, ~6–8 px at slop 10.
+  {
+    const t = Math.max(0, Math.min(1, 1 - cfg.compression / 100));
+    const minOff = Math.max(2, Math.round(t * 6));
+    const dw = minOff + Math.floor(Math.random() * 3);
+    const dh = minOff + Math.floor(Math.random() * 3);
+
+    // A. Scale down to a slightly misaligned resolution, then back up with bilinear
+    //    interpolation. Each pass accumulates a little more smear — this is the core
+    //    of authentic "forwarded image" blur rather than pure JPEG blockiness.
+    const rw = Math.max(4, w - dw);
+    const rh = Math.max(4, h - dh);
+    const tmpA = offscreenCanvas(rw, rh);
+    tmpA.ctx.drawImage(canvas, 0, 0, rw, rh);
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(tmpA.canvas, 0, 0, w, h);
+
+    // B. Ratio drift: squish content to a slightly wrong aspect ratio then stretch back.
+    //    Simulates platforms that snap to a fixed pixel grid without preserving exact ratios.
+    const driftHoriz = Math.random() < 0.5;
+    const driftW = driftHoriz ? w + dw : w;
+    const driftH = driftHoriz ? h : h + dh;
+    const tmpB = offscreenCanvas(driftW, driftH);
+    tmpB.ctx.drawImage(canvas, 0, 0, driftW, driftH);
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(tmpB.canvas, 0, 0, w, h);
+  }
+
   // 4. JPEG re-encode (the core degradation — lossy compression artifacts)
-  const jpegQuality = Math.max(0.01, (cfg.compression / 100) * 0.95);
+  // Floor raised so per-pass quality stays above the macro-blocking threshold at moderate
+  // slop levels. Resampling now does most of the perceptual damage; compression adds
+  // accumulating loss without dominating until slop 8+.
+  const jpegQuality = Math.max(0.01, 0.34 + (cfg.compression / 100) * 0.55);
   const dataUrl = canvas.toDataURL('image/jpeg', jpegQuality);
   const reloaded = await loadImage(dataUrl);
   ctx.clearRect(0, 0, w, h);

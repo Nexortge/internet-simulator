@@ -124,7 +124,7 @@ encodingLagCheck.addEventListener('change', () => {
 
 // Live-update the lag frequency value display.
 lagFreqSlider.addEventListener('input', () => {
-  lagFreqVal.textContent = lagFreqSlider.value;
+  lagFreqVal.textContent = Math.max(1, parseInt(lagFreqSlider.value));
 });
 
 // When FPS Drops is toggled, enable/disable all dependent controls.
@@ -140,7 +140,7 @@ fpsDropsCheck.addEventListener('change', () => {
 
 // Live-update the frequency value display as the slider moves.
 freezeFreqSlider.addEventListener('input', () => {
-  freezeFreqVal.textContent = freezeFreqSlider.value;
+  freezeFreqVal.textContent = Math.max(1, parseInt(freezeFreqSlider.value));
 });
 
 // ── Upload zone ───────────────────────────────────────────
@@ -213,7 +213,7 @@ function setMode(mode) {
 // ── Magic slider ─────────────────────────────────────────
 slopSlider.addEventListener('input', syncMagicSlider);
 function syncMagicSlider() {
-  const v = parseInt(slopSlider.value);
+  const v = Math.max(1, parseInt(slopSlider.value));
   magicLevelDsp.textContent = v;
   magicVibe.textContent = MAGIC_VIBES[v];
   // Tint the level number by intensity
@@ -328,7 +328,7 @@ slopifyBtn.addEventListener('click', async () => {
   if (!currentFile) return;
 
   const configs = currentMode === 'magic'
-    ? magicConfigs(parseInt(slopSlider.value))
+    ? magicConfigs(Math.max(1, parseInt(slopSlider.value)))
     : getPassConfigs();
 
   if (configs.length === 0) { alert('Add at least one pass.'); return; }
@@ -358,7 +358,7 @@ slopifyBtn.addEventListener('click', async () => {
 });
 
 async function degradeServerSide(file, passConfigs) {
-  const slopLevel = currentMode === 'magic' ? parseInt(slopSlider.value) : 5;
+  const slopLevel = currentMode === 'magic' ? Math.max(1, parseInt(slopSlider.value)) : 5;
 
   // Generate a unique job ID so the server can push progress events to this tab only.
   const jobId = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36);
@@ -385,7 +385,7 @@ async function degradeServerSide(file, passConfigs) {
     form.append('lagConfig', JSON.stringify({
       enabled:      true,
       slopLevel,
-      lagFrequency: parseInt(lagFreqSlider.value),
+      lagFrequency: Math.max(1, parseInt(lagFreqSlider.value)),
     }));
   }
 
@@ -394,7 +394,7 @@ async function degradeServerSide(file, passConfigs) {
       enabled:          true,
       datamorphEnabled: datamorphCheck.checked,
       slopLevel,
-      freezeFrequency:  parseInt(freezeFreqSlider.value),
+      freezeFrequency:  Math.max(1, parseInt(freezeFreqSlider.value)),
       loopTypeBias:     parseInt(freezeStyleSlider.value),
     }));
   }
