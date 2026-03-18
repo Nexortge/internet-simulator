@@ -143,22 +143,36 @@ Each pass runs this pipeline:
 1. **Scale down → scale back up** — interpolation blur from resampling at a lower resolution
 2. **Random micro-crop** — crops up to the configured % on each edge, then stretches back, simulating content drift from repeated cropping and resizing
 3. **Slight random rotation** — sub-degree rotation with bicubic resampling, causing edge softening
-4. **JPEG re-encode** — draws to canvas and exports with a low `quality` value via `toDataURL('image/jpeg', quality)`, adding the classic JPEG block artifacts
-5. **Noise injection** — iterates over raw pixel data and randomly perturbs R, G, B channels
-6. **Color drift** — adjusts saturation and applies a warm/cool hue shift to simulate repeated JPEG chroma subsampling
+4. **Misaligned resample** — two coupled sub-steps that simulate a platform encoding to a non-standard pixel grid:
+   - Scale down by a random 2–8 px offset (magnitude scales with slop level) and back up with bilinear interpolation — each pass accumulates a little more smear, producing the authentic "forwarded image" softness that's distinct from JPEG blockiness
+   - Ratio drift: squish the content into a canvas that's a few pixels wider or taller and stretch back — simulates platforms snapping to a fixed pixel grid without preserving the exact aspect ratio
+5. **JPEG re-encode** — draws to canvas and exports via `toDataURL('image/jpeg', quality)`. Quality floor is raised (0.34 + compression × 0.55) so individual passes stay above the macro-blocking threshold; the accumulated damage across many passes is what destroys the image, not a single brutal quality setting
+6. **Noise injection** — iterates over raw pixel data and randomly perturbs R, G, B channels
+7. **Color drift** — adjusts saturation and applies a warm/cool hue shift to simulate repeated JPEG chroma subsampling
 
 ### Video & audio degradation (server-side, FFmpeg)
 
 Implemented in `server.js`. The uploaded file is processed through a pipeline of FFmpeg passes and optional effect stages.
 
 **Compression passes** (`buildFFmpegArgs`):
-- **Pixelation**: scale down by a factor, then scale back up with nearest-neighbor (`flags=neighbor`) before encoding — makes the codec compress blocky rather than smooth content
-- **Scale down/up**: same idea but with bilinear resampling — introduces blur from resolution loss
+- **Pixelation**: scale down by a factor, then scale back up — pass 1 uses nearest-neighbor (`flags=neighbor`) for hard blockiness, later passes switch to bicubic to mimic what Instagram/WhatsApp do (smooth the blocks into blur)
+- **Scale down/up**: bilinear resampling — introduces blur from resolution loss, same pass-aware upscale flag as pixelation
+- **Misaligned resample**: same two-step approach as images but in FFmpeg filter syntax — scale down by an even pixel offset and back up with bicubic, then pad 1–2 random sides by the same offset and scale back, squishing the padding into the content
 - **Noise**: FFmpeg `noise=alls=N:allf=t+u` — adds temporal + uniform noise to every frame
 - **Color drift**: FFmpeg `eq=saturation=X:brightness=Y` — desaturates and shifts brightness slightly each pass
 - **FPS reduction**: `fps=N` filter — drops frames to simulate low-quality encoding settings
-- **Bad cropping**: `pad` filter adds black or white bars on 1–3 randomly chosen sides (2–9% thick each), then a `scale` filter squishes back to original dimensions — the slight aspect ratio mismatch produces the subtle stretch you see on badly re-cropped videos. Probability scales with slop level.
-- **Compression**: libx264 CRF encoding — higher CRF = more compression artifacts
+- **Bad cropping**: `pad` filter adds bars on 1–3 randomly chosen sides (2–9% thick each) using real platform UI colours (Instagram dark, TikTok dark/white, Discord dark), then a `scale` filter squishes back — the aspect ratio mismatch produces the subtle stretch of a badly re-cropped video. Probability scales with slop level.
+- **Compression**: libx264 CRF encoding (CRF 20 at slop 1 → CRF 43 at slop 10) — kept deliberately moderate so compression supports the resampling artefacts rather than dominating them
+
+**Audio degradation** (`buildAudioFilters`, applied to both video audio tracks and standalone audio files):
+
+Each pass probabilistically applies a chain of `-af` filters that simulate what platforms do to audio on every re-upload:
+
+- **Sync drift** (`adelay`, video only): per-pass delay of 5–50 ms that accumulates across passes — at slop 10 the expected total is ~350 ms of A/V desync. Skipped for audio-only files since there is no video reference to drift against.
+- **Sample rate artefacts** (`aresample`): downsamples to a misaligned intermediate rate (22 050 → 16 000 → 11 025 Hz as slop increases) then back up to 48 000 Hz (video) or 44 100 Hz (audio). The lossy round-trip introduces aliasing shimmer on high frequencies.
+- **Clipping / loudness normalisation** (`volume` + hard clip): boosts gain by 1.0–1.8× then hard-clips to [-1, 1], producing flat-top waveform distortion — the sound of a file normalised too hot. Uses the best available clip filter in the current FFmpeg build (`aclip` → `asoftclip=type=hard` → `aeval` fallback, detected at startup).
+- **Pre-echo / codec ghosting** (`aecho`): 5–15 ms ghost at 0.02–0.15 gain — nearly inaudible at low slop, a faint shimmer by slop 7–8, simulating psychoacoustic smearing from repeated MP3/AAC encoding.
+- **Stereo collapse / one-ear** (`pan`): at mid–high slop levels, randomly either collapses stereo to mono-in-stereo (both channels summed equally) or hard-pans to a single channel. Mutually exclusive — one roll picks the branch. Skipped when the signal is already being forced to mono.
 
 **Pipeline ordering** (random FX insertion):
 Compression passes are numbered 1…N. Each enabled video effect (lag, freeze, datamorphing) is assigned a random slot between passes and sorted in, so the effects can land before, between, or after compression — not always at the end.
